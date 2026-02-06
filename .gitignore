@@ -1,0 +1,11 @@
+# Zig
+# If you have OS-specific or editor-specific files to ignore,
+# such as *.swp or .DS_Store, put those in your global gitignore
+# or in a separate .gitignore file in the relevant directory.
+
+zig-out/
+.zig-cache/
+*.exe
+*.dll
+*.so
+*.dylib
