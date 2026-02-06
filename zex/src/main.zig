@@ -1,35 +1,52 @@
 const std = @import("std");
-// const assert = std.debug.assert;
+const assert = std.debug.assert;
 
 pub fn main() !void {
     var args = std.process.args();
     _ = args.next();
     const fname = args.next() orelse return error.NoFileProvided;
 
+    const offset_s = args.next() orelse "";
+    const offset = if (offset_s.len == 0) 0 else (try std.fmt.parseInt(usize, offset_s, 10));
+
+    const len_s = args.next() orelse "";
+    // todo handle if they actually put 0
+    const len = if (len_s.len == 0) 0 else (try std.fmt.parseInt(usize, len_s, 10));
+
     var read_in_buf: [0x1000]u8 = undefined;
-    var line_buf: [0x1000]u8 = undefined;
-    var line_buf_slice: []u8 = &line_buf;
 
     const file = try std.fs.cwd().openFileZ(fname, .{ .mode = .read_only });
+
+    if (offset > 0) {
+        _ = try file.seekTo(offset); 
+    }
 
     const fsize = (try file.stat()).size;
 
     const stdout = std.fs.File.stdout();
 
-    const bytes_per_line = 16;
-    var renderer = Renderer.init(line_buf_slice[0..], fsize, .{ .bytes_per_line=bytes_per_line });
+    const bytes_per_line = 32;
+    var renderer = Renderer.init(fsize, .{ .bytes_per_line=bytes_per_line });
 
-    var file_cursor: usize = 0;
+    var file_cursor: usize = offset;
     while (true) {
         const bytes_read = try file.readAll(&read_in_buf);
         if (bytes_read == 0) { break; }
 
         var block_cursor: usize = 0;
         while (block_cursor < bytes_read) {
-            const count = @min(bytes_per_line, bytes_read - block_cursor);
+            if (len > 0 and file_cursor >= offset + len) { break; }
+
+            var count = @min(bytes_per_line, bytes_read - block_cursor);
+            if (len > 0) {
+                count = @min(count, offset + len - file_cursor);
+            }
+
             const result = renderer.renderLine(read_in_buf[block_cursor..block_cursor+count], file_cursor);
+
             block_cursor += count;
             file_cursor += count;
+
             _ = try stdout.write(result);
         }
     }
@@ -77,7 +94,7 @@ const Color = enum {
 const Renderer = struct {
     nil_line_count: usize,
     offset_digits: usize,
-    buffer: []u8,
+    buffer: [0x2000]u8,
     config: Config,
 
     const Config = struct {
@@ -108,13 +125,15 @@ const Renderer = struct {
     /// The caller is responsible for ensuring line_buffer is sufficiently large.
     /// The Renderer will simply stop inserting bytes if it runs out of space - lines
     /// will effectively be truncated.
-    fn init(line_buffer: []u8, fsize: usize, config: Config) Renderer {
+    fn init(fsize: usize, config: Config) Renderer {
         const offset_digits = @max(1, (@bitSizeOf(usize) - @clz(fsize) + 3) / 4);
+
+        assert(config.bytes_per_line <= 256);
 
         return Renderer {
             .nil_line_count = 0,
             .offset_digits = offset_digits,
-            .buffer = line_buffer,
+            .buffer = undefined,
             .config = config,
         };
     }
@@ -136,18 +155,15 @@ const Renderer = struct {
         var prev_color = Color.white;
         const reset = Color.reset.asStr();
 
-        if (std.mem.allEqual(u8, bytes, 0)) {
-            if (self.nil_line_count == 0) {
-                self.buffer[0] = '*';
-                buffer_ptr += 1;
-                self.buffer[1] = '\n';
-                buffer_ptr += 1;
-            } 
-
+        const nil_line = std.mem.allEqual(u8, bytes, 0);
+        if (nil_line) {
             self.nil_line_count += 1;
-            return self.buffer[0..buffer_ptr];
+            if (self.nil_line_count > 1) {
+                return self.buffer[0..0];
+            }
+        } else {
+            self.nil_line_count = 0;
         }
-
 
         if (self.config.should_style) {
             const grey = Color.grey.asStr();
@@ -155,6 +171,7 @@ const Renderer = struct {
             buffer_ptr += grey.len;
         }
 
+        // offset prefix
         buffer_ptr += (
             std.fmt.bufPrint(
                 self.buffer[buffer_ptr..], "{x:0>[1]}: ",
@@ -162,6 +179,18 @@ const Renderer = struct {
             catch unreachable
         ).len;
 
+        // if first nil line then print star and return
+        if (nil_line) {
+            const magenta = Color.magenta.asStr();
+            @memcpy(self.buffer[buffer_ptr..buffer_ptr+magenta.len], magenta);
+            buffer_ptr += magenta.len;
+            const str = "..\n";
+            @memcpy(self.buffer[buffer_ptr..buffer_ptr+str.len], str);
+            buffer_ptr += str.len;
+            return self.buffer[0..buffer_ptr];
+        } 
+
+        // actual bytes
         if (self.config.should_style) {
             const white = Color.white.asStr();
             @memcpy(self.buffer[buffer_ptr..buffer_ptr+white.len], white);
@@ -171,6 +200,7 @@ const Renderer = struct {
         for (0..self.config.bytes_per_line) | i| {
             if (i < bytes.len) {
                 const byte = bytes[i];
+
                 if (self.config.should_style) {
                     const color = byteColor(byte);
 
@@ -179,6 +209,7 @@ const Renderer = struct {
                         const ansi = color.asStr();
 
                         @memcpy(self.buffer[buffer_ptr..buffer_ptr+reset.len], reset);
+                        buffer_ptr += reset.len;
                         @memcpy(self.buffer[buffer_ptr..buffer_ptr+ansi.len], ansi);
                         buffer_ptr += ansi.len;
                     }
@@ -219,10 +250,10 @@ const Renderer = struct {
             if (self.config.should_style) {
                 const italic = Color.italic.asStr();
                 @memcpy(self.buffer[buffer_ptr..buffer_ptr+italic.len], italic);
-                buffer_ptr += reset.len;
-                const inverse = Color.dim.asStr();
-                @memcpy(self.buffer[buffer_ptr..buffer_ptr+inverse.len], inverse);
-                buffer_ptr += reset.len;
+                buffer_ptr += italic.len;
+                const dim = Color.dim.asStr();
+                @memcpy(self.buffer[buffer_ptr..buffer_ptr+dim.len], dim);
+                buffer_ptr += dim.len;
             }
 
             for (bytes) |byte| {
