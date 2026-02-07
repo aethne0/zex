@@ -64,15 +64,15 @@ const Color = enum {
 
     fn asStr(self: Color) []const u8 {
         return switch(self) {
-            .black   => "\x1b[30m",
-            .red     => "\x1b[31m",
-            .green   => "\x1b[32m",
-            .yellow  => "\x1b[33m",
-            .blue    => "\x1b[34m",
-            .magenta => "\x1b[35m",
-            .cyan    => "\x1b[36m",
-            .white   => "\x1b[37m",
-            .grey    => "\x1b[90m",
+            .black          => "\x1b[30m",
+            .red            => "\x1b[31m",
+            .green          => "\x1b[32m",
+            .yellow         => "\x1b[33m",
+            .blue           => "\x1b[34m",
+            .magenta        => "\x1b[35m",
+            .cyan           => "\x1b[36m",
+            .white          => "\x1b[37m",
+            .grey           => "\x1b[90m",
 
             .cyan_bright    => "\x1b[96m",
             .white_bright   => "\x1b[97m",
@@ -96,6 +96,8 @@ const Renderer = struct {
     offset_digits: usize,
     buffer: [0x2000]u8,
     config: Config,
+
+    cursor: usize = 0,
 
     const Config = struct {
         bytes_per_line: usize = 16,
@@ -138,12 +140,24 @@ const Renderer = struct {
         };
     }
 
+    fn writeSlice(self: *Renderer, bytes: []const u8) void {
+        assert(bytes.len <= self.buffer.len - self.cursor);
+        @memcpy(self.buffer[self.cursor..self.cursor+bytes.len], bytes);
+        self.cursor += bytes.len;
+    }
+
+    fn writeByte(self: *Renderer, byte: u8) void {
+        assert(self.buffer.len - self.cursor > 0);
+        self.buffer[self.cursor] = byte;
+        self.cursor += 1;
+    }
+
     fn byteColor(byte: u8) Color {
         if (byte == 0x00) return Color.magenta;
         if (byte == 0xff) return Color.blue;
         if (std.ascii.isControl(byte)) return Color.yellow;
         if (std.ascii.isAscii(byte)) return Color.white_bright;
-        return Color.white;
+        return Color.magenta;
     }
 
     fn renderLine(
@@ -151,9 +165,9 @@ const Renderer = struct {
         bytes: []const u8,
         start: usize,
     ) []u8 {
-        var buffer_ptr: usize = 0;
+        self.cursor = 0;
+
         var prev_color = Color.white;
-        const reset = Color.reset.asStr();
 
         const nil_line = std.mem.allEqual(u8, bytes, 0);
         if (nil_line) {
@@ -166,35 +180,27 @@ const Renderer = struct {
         }
 
         if (self.config.should_style) {
-            const grey = Color.grey.asStr();
-            @memcpy(self.buffer[buffer_ptr..buffer_ptr+grey.len], grey);
-            buffer_ptr += grey.len;
+            self.writeSlice(Color.grey.asStr());
         }
 
         // offset prefix
-        buffer_ptr += (
+        self.cursor += (
             std.fmt.bufPrint(
-                self.buffer[buffer_ptr..], "{x:0>[1]}: ",
+                self.buffer[self.cursor..], "{x:0>[1]}: ",
                 .{start, self.offset_digits})
             catch unreachable
         ).len;
 
         // if first nil line then print star and return
         if (nil_line) {
-            const magenta = Color.magenta.asStr();
-            @memcpy(self.buffer[buffer_ptr..buffer_ptr+magenta.len], magenta);
-            buffer_ptr += magenta.len;
-            const str = "..\n";
-            @memcpy(self.buffer[buffer_ptr..buffer_ptr+str.len], str);
-            buffer_ptr += str.len;
-            return self.buffer[0..buffer_ptr];
+            self.writeSlice(Color.magenta.asStr());
+            self.writeSlice("..\n");
+            return self.buffer[0..self.cursor];
         } 
 
         // actual bytes
         if (self.config.should_style) {
-            const white = Color.white.asStr();
-            @memcpy(self.buffer[buffer_ptr..buffer_ptr+white.len], white);
-            buffer_ptr += white.len;
+            self.writeSlice(Color.white.asStr());
         }
 
         for (0..self.config.bytes_per_line) | i| {
@@ -206,54 +212,42 @@ const Renderer = struct {
 
                     if (color != prev_color) {
                         prev_color = color;
-                        const ansi = color.asStr();
-
-                        @memcpy(self.buffer[buffer_ptr..buffer_ptr+reset.len], reset);
-                        buffer_ptr += reset.len;
-                        @memcpy(self.buffer[buffer_ptr..buffer_ptr+ansi.len], ansi);
-                        buffer_ptr += ansi.len;
+                        self.writeSlice(Color.reset.asStr());
+                        self.writeSlice(color.asStr());
                     }
                 }
 
-                buffer_ptr += (
-                    std.fmt.bufPrint(self.buffer[buffer_ptr..], "{x:0>2}", .{byte}) 
+                self.cursor += (
+                    std.fmt.bufPrint(self.buffer[self.cursor..], "{x:0>2}", .{byte}) 
                     catch unreachable
                 ).len;
             } else {
-                buffer_ptr += (
-                    std.fmt.bufPrint(self.buffer[buffer_ptr..], "  ", .{}) 
+                self.cursor += (
+                    std.fmt.bufPrint(self.buffer[self.cursor..], "  ", .{}) 
                     catch unreachable
                 ).len;
             }
 
             if (self.config.group_size > 0) {
                 if ((i + 1) % self.config.group_size == 0 and i + 1 < self.config.bytes_per_line) {
-                    self.buffer[buffer_ptr] = ' ';
-                    buffer_ptr += 1;
+                    self.writeByte(' ');
                 }
             }
 
             if (self.config.supergroup_size > 0) {
                 if ((i + 1) % self.config.supergroup_size == 0 and i + 1 < self.config.bytes_per_line) {
-                    self.buffer[buffer_ptr] = ' ';
-                    buffer_ptr += 1;
+                    self.writeByte(' ');
                 }
             }
         }
 
         // ascii-representation postlude
         if (self.config.ascii_postlude) {
-            self.buffer[buffer_ptr] = ' ';
-            self.buffer[buffer_ptr + 1] = ' ';
-            buffer_ptr += 2;
+            self.writeSlice("  ");
 
             if (self.config.should_style) {
-                const italic = Color.italic.asStr();
-                @memcpy(self.buffer[buffer_ptr..buffer_ptr+italic.len], italic);
-                buffer_ptr += italic.len;
-                const dim = Color.dim.asStr();
-                @memcpy(self.buffer[buffer_ptr..buffer_ptr+dim.len], dim);
-                buffer_ptr += dim.len;
+                self.writeSlice(Color.italic.asStr()); 
+                self.writeSlice(Color.dim.asStr()); 
             }
 
             for (bytes) |byte| {
@@ -262,31 +256,25 @@ const Renderer = struct {
 
                     if (color != prev_color) {
                         prev_color = color;
-                        const ansi = color.asStr();
-
-                        @memcpy(self.buffer[buffer_ptr..buffer_ptr+ansi.len], ansi);
-                        buffer_ptr += ansi.len;
+                        self.writeSlice(color.asStr());
                     }
                 }
 
                 if (std.ascii.isAscii(byte) and !std.ascii.isControl(byte)) {
-                    self.buffer[buffer_ptr] = byte;
+                    self.writeByte(byte);
                 } else {
-                    self.buffer[buffer_ptr] = '.';
+                    self.writeByte('.');
                 }
-                buffer_ptr += 1;
             }
         }
         
         if (self.config.should_style) {
-            @memcpy(self.buffer[buffer_ptr..buffer_ptr+reset.len], reset);
-            buffer_ptr += reset.len;
+            self.writeSlice(Color.reset.asStr());
         }
 
-        self.buffer[buffer_ptr] = '\n';
-        buffer_ptr += 1;
+        self.writeByte('\n');
 
-        return self.buffer[0..buffer_ptr];
+        return self.buffer[0..self.cursor];
     }
 };
 
