@@ -9,3 +9,5 @@ zig-out/
 *.dll
 *.so
 *.dylib
+
+.session.vim
