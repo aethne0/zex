@@ -53,10 +53,12 @@ pub fn main() !void {
 }
 
 const Color = enum {
-    black, red, green, yellow, 
-    blue, magenta, cyan, white,
-    grey,
+    black, red, green,
+    yellow, blue, magenta,
+    cyan, white, grey,
 
+    red_bright, green_bright, yellow_bright,
+    blue_bright, magenta_bright,
     cyan_bright, white_bright,
 
     fn asStr(self: Color) []const u8 {
@@ -70,7 +72,11 @@ const Color = enum {
             .cyan           => "\x1b[36m",
             .white          => "\x1b[37m",
             .grey           => "\x1b[90m",
-
+            .red_bright     => "\x1b[91m",
+            .green_bright   => "\x1b[92m",
+            .yellow_bright  => "\x1b[93m",
+            .blue_bright    => "\x1b[94m",
+            .magenta_bright => "\x1b[95m",
             .cyan_bright    => "\x1b[96m",
             .white_bright   => "\x1b[97m",
         };
@@ -100,7 +106,7 @@ const Renderer = struct {
     nil_line_count: usize,
     offset_digits: usize,
     buffer: [0x2000]u8,
-    config: Config,
+    cfg: Config,
 
     cursor: usize = 0,
 
@@ -121,15 +127,24 @@ const Renderer = struct {
         /// 8 -> `7f ba 88 44 12 ab 5b 0e  a9 fb 3d 4a 99 88 4b 00`
         /// If supergroup_size <= group_size it will be silly
         supergroup_size: usize = 0,
-        /// First entire line of zeroes will be abbreviated as *, then subsequent
-        /// zero lines following that one will return empty buffer. Gets reset
-        /// when we encounter a non-zero line of course.
-        skip_zeroes: bool = false,
         /// Color output using tty escape sequence. Disable if not a tty.
         should_style: bool = true,
         /// Uppercase hex as opposed to lowercase.
         uppercase: bool = false,
+
+        /// First entire line of zeroes will be abbreviated as *, then subsequent
+        /// zero lines following that one will return empty buffer. Gets reset
+        /// when we encounter a non-zero line of course.
+        skip_zeroes: bool = true,
+        /// Show offset from start on the left
+        offset_prelude: bool = true,
+
+        /// Show ascii representation on the right
         ascii_postlude: bool = true, 
+        /// Various integer interpretation postludes
+        u16_postlude: bool = false, 
+        u32_postlude: bool = false, 
+        u64_postlude: bool = false, 
     };
 
 
@@ -145,7 +160,7 @@ const Renderer = struct {
             .nil_line_count = 0,
             .offset_digits = offset_digits,
             .buffer = undefined,
-            .config = config,
+            .cfg = config,
         };
     }
 
@@ -163,6 +178,8 @@ const Renderer = struct {
     }
 
     fn applyStyle(self: *Renderer, ansi: Ansi) void {
+        if (!self.cfg.should_style) { return; }
+
         if (ansi.style) |style_| {
             if (style_ != self.style) {
                 // TODO: atm we are doing more work than we need to in non-reset cases
@@ -175,7 +192,6 @@ const Renderer = struct {
             self.writeSliceInner(Style.reset.asStr());
             self.style = Style.reset;
             self.color = Color.white;
-            return;
         } 
 
         if (self.color != ansi.color) {
@@ -195,7 +211,7 @@ const Renderer = struct {
     }
 
     fn byteColor(byte: u8) Color {
-        if (byte == 0x00) return Color.magenta;
+        if (byte == 0x00) return Color.grey;
         if (byte == 0xff) return Color.blue;
         if (std.ascii.isControl(byte)) return Color.yellow;
         if (std.ascii.isAscii(byte)) return Color.white_bright;
@@ -209,7 +225,7 @@ const Renderer = struct {
     ) []u8 {
         self.cursor = 0;
 
-        const nil_line = std.mem.allEqual(u8, bytes, 0);
+        const nil_line = self.cfg.skip_zeroes and std.mem.allEqual(u8, bytes, 0);
         if (nil_line) {
             self.nil_line_count += 1;
             if (self.nil_line_count > 1) {
@@ -220,44 +236,75 @@ const Renderer = struct {
         }
 
         // offset prefix
-        self.writeSliceFmt("{x:0>[1]}: ", .{ start, self.offset_digits }, .{ .color=Color.grey });
+        if (self.cfg.offset_prelude) {
+            self.writeSliceFmt("{x:0>[1]}", .{ start, self.offset_digits }, .{ .color=Color.cyan, .style=Style.italic});
+            self.writeSlice(": ", .{ .color=Color.white, .style=Style.reset });
+        }
 
         // if first nil line then print star and return
         if (nil_line) {
-            self.writeSlice("..\n", .{ .color=Color.magenta });
+            self.writeSlice("..\n", .{ .color=byteColor(0x00) });
             return self.buffer[0..self.cursor];
         } 
 
-        for (0..self.config.bytes_per_line) | i| {
+        for (0..self.cfg.bytes_per_line) | i| {
             if (i < bytes.len) {
                 self.writeSliceFmt("{x:0>2}", .{ bytes[i] }, .{ .color=byteColor(bytes[i]) });
             } else {
-                self.writeSlice("  ", .{ .color=byteColor(bytes[i]) });
+                self.writeSlice("  ", .{ .color=Color.white });
             }
 
-            if (self.config.group_size > 0) {
-                if ((i + 1) % self.config.group_size == 0 and i + 1 < self.config.bytes_per_line) {
+            if (self.cfg.group_size > 0) {
+                if ((i + 1) % self.cfg.group_size == 0 and i + 1 < self.cfg.bytes_per_line) {
                     self.writeSlice(" ", .{ .color=Color.white });
                 }
             }
 
-            if (self.config.supergroup_size > 0) {
-                if ((i + 1) % self.config.supergroup_size == 0 and i + 1 < self.config.bytes_per_line) {
+            if (self.cfg.supergroup_size > 0) {
+                if ((i + 1) % self.cfg.supergroup_size == 0 and i + 1 < self.cfg.bytes_per_line) {
                     self.writeSlice(" ", .{ .color=Color.white });
                 }
             }
         }
 
         // ascii-representation postlude
-        if (self.config.ascii_postlude) {
+        if (self.cfg.ascii_postlude) {
             self.writeSlice("  ", .{ .color=Color.white });
 
             for (bytes) |byte| {
                 if (std.ascii.isAscii(byte) and !std.ascii.isControl(byte)) {
-                    self.writeSliceFmt("{c}", .{ byte }, .{ .color=byteColor(byte), .style=Style.dim });
+                    self.writeSliceFmt("{c}", .{ byte }, .{ .color=byteColor(byte), .style=Style.italic });
                 } else {
-                    self.writeSlice(".", .{ .color=byteColor(byte), .style=Style.dim });
+                    self.writeSlice(".", .{ .color=byteColor(byte), .style=Style.italic });
                 }
+            }
+        }
+
+        // integer representation postlude
+        if (self.cfg.u16_postlude) {
+            self.writeSlice("  ", .{ .color=Color.white });
+
+            for (0..bytes.len/@sizeOf(u16)) |i| {
+                const value = std.mem.readInt(u16, bytes[i*@sizeOf(u16)..][0..@sizeOf(u16)], .big);
+                self.writeSliceFmt("{d: >5} ", .{ value }, .{ .color=Color.white, .style=Style.italic });
+            }
+        }
+
+        if (self.cfg.u32_postlude) {
+            self.writeSlice("  ", .{ .color=Color.white });
+
+            for (0..bytes.len/@sizeOf(u32)) |i| {
+                const value = std.mem.readInt(u32, bytes[i*@sizeOf(u32)..][0..@sizeOf(u32)], .big);
+                self.writeSliceFmt("{d: >10} ", .{ value }, .{ .color=Color.white, .style=Style.italic });
+            }
+        }
+
+        if (self.cfg.u64_postlude) {
+            self.writeSlice("  ", .{ .color=Color.white });
+
+            for (0..bytes.len/@sizeOf(u64)) |i| {
+                const value = std.mem.readInt(u64, bytes[i*@sizeOf(u64)..][0..@sizeOf(u64)], .big);
+                self.writeSliceFmt("{d: >20} ", .{ value }, .{ .color=Color.white, .style=Style.italic });
             }
         }
 
